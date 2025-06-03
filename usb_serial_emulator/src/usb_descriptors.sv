@@ -115,10 +115,10 @@ package usb_descriptors;
     0,           // bControlInterface: Interface number of the controlling interface (Interface 0 - CCI)
     1,           // bSubordinateInterface0: Interface number of the first subordinate interface (Interface 1 - DCI)
 
-    // Endpoint Descriptor (Interrupt IN for CCI)
+    // Endpoint Descriptor (Interrupt IN for CCI - e.g., EP3 IN)
     7,           // bLength: Descriptor size in bytes (7 bytes)
     5,           // bDescriptorType: ENDPOINT (0x05)
-    8'h81,       // bEndpointAddress: Endpoint address (IN endpoint, number 1) (0x81)
+    8'h83,       // bEndpointAddress: Endpoint address (IN endpoint, number 3) (0x83)
                  // D7: Direction (0=OUT, 1=IN)
                  // D6..4: Reserved (reset to 0)
                  // D3..0: Endpoint number
@@ -126,8 +126,8 @@ package usb_descriptors;
                  // D1..0: Transfer Type (00=Control, 01=Isochronous, 10=Bulk, 11=Interrupt)
                  // D3..2: If Isochronous: Synchronization Type (00=No Sync, 01=Async, 10=Adaptive, 11=Sync)
                  // D5..4: If Isochronous: Usage Type (00=Data EP, 01=Feedback EP, 10=Implicit FB Data EP, 11=Reserved)
-    8, 0,        // wMaxPacketSize: Maximum packet size for this endpoint. (8 bytes) (LSB, MSB)
-    10           // bInterval: Polling interval for data transfers (10ms for FS Interrupt)
+    16, 0,       // wMaxPacketSize: Maximum packet size for this endpoint. (16 bytes, SERIAL_STATE is 10 bytes: 8 header + 2 payload) (LSB, MSB)
+    8'hFF        // bInterval: Polling interval for data transfers (255ms for FS Interrupt, or a lower value like 10ms (0x0A))
 
     // --- CDC Data Class Interface (DCI) ---
     // Interface Descriptor

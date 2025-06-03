@@ -259,8 +259,14 @@ module usb_serial_top #(
 
   // CDC EP0 path: cdc_acm_handler -> Adapter
   // ep0_data_tx_valid_from_cdc, ep0_data_tx_from_cdc, ep0_data_tx_last_from_cdc, ep0_stall_from_cdc are declared
-  logic                        ep0_ack_from_cdc_to_adapter_wire; // cdc_acm_handler's general ACK, input to adapter
-  logic                        ep0_data_rx_ready_from_cdc_to_adapter_wire; // cdc_acm_handler ready for EP0 OUT data
+  logic                        ep0_ack_from_cdc_to_adapter_wire;
+  logic                        ep0_data_rx_ready_from_cdc_to_adapter_wire;
+
+  // Interrupt IN path: cdc_acm_handler -> Adapter
+  logic                        intr_data_valid_from_cdc_to_adapter_wire;
+  logic [APP_DATA_WIDTH-1:0]   intr_data_from_cdc_to_adapter_wire;
+  logic                        intr_data_last_from_cdc_to_adapter_wire;
+  logic                        intr_data_ready_to_cdc_from_adapter_wire;
 
   // Bulk OUT path: Adapter -> Bulk OUT FIFO
   logic [APP_DATA_WIDTH-1:0]   adapter_to_bulk_out_fifo_din_w;
@@ -412,6 +418,11 @@ module usb_serial_top #(
       .ep0_stall(ep0_stall_from_cdc),
       .ep0_ack(ep0_ack_from_cdc_to_adapter_wire),
       .ep0_data_rx_ready_from_cdc(ep0_data_rx_ready_from_cdc_to_adapter_wire),
+      // Interrupt IN path from CDC to Adapter
+      .intr_data_valid_from_cdc_i(intr_data_valid_from_cdc_to_adapter_wire),
+      .intr_data_from_cdc_i(intr_data_from_cdc_to_adapter_wire),
+      .intr_data_last_from_cdc_i(intr_data_last_from_cdc_to_adapter_wire),
+      .intr_data_ready_to_cdc_o(intr_data_ready_to_cdc_from_adapter_wire),
       // Bulk OUT FIFO side
       .bulk_out_din(adapter_to_bulk_out_fifo_din_w),
       .bulk_out_wr_en(adapter_to_bulk_out_fifo_wr_en_w),
