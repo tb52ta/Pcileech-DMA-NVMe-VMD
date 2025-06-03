@@ -6,8 +6,8 @@
 `define FT601_PROTOCOL_ADAPTER_SV
 
 module ft601_protocol_adapter #(
-    parameter FT601_DATA_WIDTH = 32, // Data width of the pcileech_ft601 interface
-    parameter APP_DATA_WIDTH   = 8   // Data width for bulk FIFOs and CDC EP0 data bytes
+    parameter FT601_DATA_WIDTH = 32,
+    parameter APP_DATA_WIDTH   = 8
 ) (
     input logic clk_sys,
     input logic rst_sys,
@@ -22,19 +22,19 @@ module ft601_protocol_adapter #(
     // Interface to cdc_acm_handler (EP0 signals)
     output logic                        ep0_setup_packet_valid,
     output logic [63:0]                 ep0_setup_packet_data,
-    output logic                        ep0_data_tx_ready,      // Adapter ready for EP0 IN data byte from CDC
-    output logic                        ep0_in_ack_received,    // Adapter received host IN ZLP/ACK for EP0 IN data
-    output logic                        ep0_out_data_available, // Data from host for EP0 OUT is available for CDC
+    output logic                        ep0_data_tx_ready,
+    output logic                        ep0_in_ack_received,
+    output logic                        ep0_out_data_available,
     output logic [APP_DATA_WIDTH-1:0]   ep0_out_data,
     output logic                        ep0_out_data_last,
 
     input  logic [APP_DATA_WIDTH-1:0]   ep0_data_tx,
     input  logic                        ep0_data_tx_valid,
     input  logic                        ep0_data_tx_last,
-    input  logic                        ep0_stall,      // CDC requests EP0 stall
-    input  logic                        ep0_ack,        // CDC ACKed SETUP, or completed DATA/STATUS for its part
+    input  logic                        ep0_stall,
+    input  logic                        ep0_ack,
 
-    input  logic                        ep0_data_rx_ready_from_cdc, // CDC ready for next EP0 OUT byte
+    input  logic                        ep0_data_rx_ready_from_cdc,
 
     // Interface to Bulk OUT FIFO (Adapter to FIFO)
     output logic [APP_DATA_WIDTH-1:0]   bulk_out_din,
@@ -46,77 +46,96 @@ module ft601_protocol_adapter #(
     output logic                        bulk_in_rd_en
 );
 
-  // Protocol Definition
   localparam CH_WIDTH = 4;
   localparam CH_POS   = FT601_DATA_WIDTH - CH_WIDTH;
 
-  localparam CH_EP0_SETUP              = 4'h0; // H->F: Setup packet (2 words for 8 bytes)
-  localparam CH_EP0_DATA_OUT_FROM_HOST = 4'h1; // H->F: Data for EP0 OUT (byte per word in lower bits)
-  localparam CH_EP0_IN_STATUS_FROM_HOST= 4'h2; // H->F: Host ACK for EP0 IN data (ZLP or status packet)
+  localparam CH_EP0_SETUP              = 4'h0;
+  localparam CH_EP0_DATA_OUT_FROM_HOST = 4'h1;
+  localparam CH_EP0_IN_STATUS_FROM_HOST= 4'h2; // Host ACK for EP0 IN data (ZLP)
 
-  localparam CH_EP0_DATA_IN_TO_HOST    = 4'h8; // F->H: Data for EP0 IN (byte per word in lower bits)
-  localparam CH_EP0_STATUS_IN_TO_HOST  = 4'h9; // F->H: ZLP status after Control Write data stage
-  localparam CH_EP0_STALL_TO_HOST      = 4'hA; // F->H: Signal EP0 STALL
+  localparam CH_EP0_DATA_IN_TO_HOST    = 4'h8;
+  localparam CH_EP0_STATUS_IN_TO_HOST  = 4'h9; // Device ZLP status for Control Write
+  localparam CH_EP0_STALL_TO_HOST      = 4'hA;
 
-  localparam CH_BULK_OUT_FROM_HOST     = 4'hC; // H->F: Bulk OUT data (byte per word)
-  localparam CH_BULK_IN_TO_HOST        = 4'hD; // F->H: Bulk IN data (byte per word)
+  localparam CH_BULK_OUT_FROM_HOST     = 4'hC;
+  localparam CH_BULK_IN_TO_HOST        = 4'hD;
 
   // RX State Machine (ft601_if_dout -> EP0/Bulk OUT FIFO)
   typedef enum logic [2:0] { RX_IDLE, RX_SETUP_P1, RX_SETUP_P2,
-                              RX_EP0_OUT_DATA_WORD, RX_BULK_OUT_WORD } rx_state_e;
+                              RX_EP0_OUT_DATA_WORD, RX_AWAIT_CDC_ACK_AFTER_OUT,
+                              RX_BULK_OUT_WORD } rx_state_e;
   rx_state_e current_rx_state, next_rx_state;
   logic [63:0] setup_packet_buffer_reg;
   logic [APP_DATA_WIDTH-1:0] ep0_out_data_byte_reg;
-  logic ep0_out_last_byte_reg; // TODO: How is last byte of EP0 OUT data indicated by host?
-  logic cdc_acked_setup; // Flag that CDC handler has ACKed the setup packet
+  logic [15:0] expected_ep0_out_len_reg;
+  logic [15:0] received_ep0_out_bytes_count_reg;
+  logic cdc_acked_setup_or_data_reg;
+  logic [63:0] current_setup_data_for_ep0_out_len;
+
 
   // TX State Machine (EP0/Bulk IN FIFO -> ft601_if_din)
   typedef enum logic [2:0] { TX_IDLE, TX_EP0_IN_DATA_WORD, TX_BULK_IN_WORD,
-                              TX_EP0_STATUS_ZLP, TX_SEND_STALL } tx_state_e;
+                              TX_EP0_STATUS_ZLP, TX_SEND_STALL,
+                              TX_AWAIT_HOST_IN_ACK } tx_state_e;
   tx_state_e current_tx_state, next_tx_state;
   logic [APP_DATA_WIDTH-1:0] ep0_tx_byte_reg;
   logic ep0_tx_last_reg;
-  logic send_ep0_status_zlp_req;
-  logic send_stall_req;
+  logic send_ep0_status_zlp_req_reg; // For Control-Write status
+  logic send_stall_req_reg;
+  logic is_control_read_data_phase_pending_ack; // True after last EP0 IN data byte sent
 
-
-  // Default assignments for outputs
-  assign ep0_setup_packet_valid = 1'b0;
+  // Default assignments
+  assign ep0_setup_packet_valid = (current_rx_state == RX_SETUP_P2) && (next_rx_state != RX_SETUP_P2); // Pulse
   assign ep0_setup_packet_data  = setup_packet_buffer_reg;
-  assign ep0_data_tx_ready      = 1'b0;
-  assign ep0_in_ack_received    = 1'b0;
+  assign ep0_data_tx_ready      = (current_tx_state == TX_IDLE) && !send_stall_req_reg && !send_ep0_status_zlp_req_reg && !is_control_read_data_phase_pending_ack;
+  assign ep0_in_ack_received    = 1'b0; // Will be pulsed combinationally
   assign ep0_out_data_available = 1'b0;
   assign ep0_out_data           = ep0_out_data_byte_reg;
-  assign ep0_out_data_last      = ep0_out_last_byte_reg;
+  assign ep0_out_data_last      = (received_ep0_out_bytes_count_reg == expected_ep0_out_len_reg) && (expected_ep0_out_len_reg > 0);
 
-  assign bulk_out_din     = ft601_if_dout[APP_DATA_WIDTH-1:0]; // Default connection
+  assign bulk_out_din     = ft601_if_dout[APP_DATA_WIDTH-1:0];
   assign bulk_out_wr_en   = 1'b0;
   assign bulk_in_rd_en    = 1'b0;
   assign ft601_if_din     = '0;
   assign ft601_if_din_wr_en = 1'b0;
 
-  // RX Logic: Processing data from FT601
+  // RX Logic
   always_ff @(posedge clk_sys or posedge rst_sys) begin
     if (rst_sys) begin
       current_rx_state <= RX_IDLE;
       setup_packet_buffer_reg <= '0;
       ep0_out_data_byte_reg <= '0;
-      ep0_out_last_byte_reg <= 1'b0;
-      cdc_acked_setup <= 1'b0;
+      cdc_acked_setup_or_data_reg <= 1'b0;
+      expected_ep0_out_len_reg <= 0;
+      received_ep0_out_bytes_count_reg <= 0;
+      current_setup_data_for_ep0_out_len <= '0;
     end else begin
       current_rx_state <= next_rx_state;
-      // Latch EP0 OUT data if valid and in the correct state
-      if (current_rx_state == RX_EP0_OUT_DATA_WORD && ft601_if_dout_valid &&
-          ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_DATA_OUT_FROM_HOST) begin
-          ep0_out_data_byte_reg <= ft601_if_dout[APP_DATA_WIDTH-1:0];
-          // TODO: ep0_out_last_byte_reg needs a way to be set from FT601 packet protocol
+      cdc_acked_setup_or_data_reg <= ep0_ack; // Latch CDC ACK
+
+      if (current_rx_state == RX_IDLE && next_rx_state == RX_SETUP_P1) begin // About to receive SETUP P1
+          current_setup_data_for_ep0_out_len <= setup_packet_data; // Latch setup data for wLength
       end
 
-      if (ep0_ack) begin // CDC handler ACKed setup or data/status phase
-          cdc_acked_setup <= 1'b1;
+      if (current_rx_state == RX_SETUP_P2 && ep0_ack) begin // CDC ACKed the SETUP packet
+          // Determine if an OUT data phase is expected
+          automatic logic [7:0] bmRT = current_setup_data_for_ep0_out_len[7:0];
+          automatic logic [15:0] wL = current_setup_data_for_ep0_out_len[63:48];
+          if (bmRT[7] == 0 && wL > 0) { // Host-to-Device with data
+              expected_ep0_out_len_reg <= wL;
+              received_ep0_out_bytes_count_reg <= 0;
+          } else {
+              expected_ep0_out_len_reg <= 0;
+              received_ep0_out_bytes_count_reg <= 0;
+          }
       end
-      if (current_rx_state == RX_IDLE) begin // Reset cdc_acked_setup when returning to RX_IDLE
-          cdc_acked_setup <= 1'b0;
+
+      if (current_rx_state == RX_EP0_OUT_DATA_WORD && ep0_out_data_available && ep0_data_rx_ready_from_cdc) begin
+          received_ep0_out_bytes_count_reg <= received_ep0_out_bytes_count_reg + 1;
+      end
+
+      if (current_rx_state == RX_AWAIT_CDC_ACK_AFTER_OUT && ep0_ack) begin
+          // CDC ACKed all EP0 OUT Data
       end
 
       case (current_rx_state)
@@ -126,183 +145,194 @@ module ft601_protocol_adapter #(
           end
         end
         RX_SETUP_P1: begin
-          if (ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_SETUP) begin // Expecting 2nd word
+          if (ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_SETUP) begin
             setup_packet_buffer_reg[63:32] <= ft601_if_dout[FT601_DATA_WIDTH-1:0];
           end
         end
-        default: begin
+        RX_EP0_OUT_DATA_WORD: begin
+             if (ep0_out_data_available) begin // This means data is valid from FT601 and correct channel
+                ep0_out_data_byte_reg <= ft601_if_dout[APP_DATA_WIDTH-1:0];
+             end
         end
+        default: ;
       endcase
     end
   end
 
   always_comb begin
     next_rx_state = current_rx_state;
-    // Combinational outputs that depend on current_rx_state or inputs
-    assign ep0_setup_packet_valid = (current_rx_state == RX_SETUP_P2);
-    assign ep0_out_data_available = (current_rx_state == RX_EP0_OUT_DATA_WORD) && ft601_if_dout_valid && (ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_DATA_OUT_FROM_HOST);
-
-    // Default bulk path (can be overridden by EP0 logic if conditions met)
-    assign bulk_out_wr_en = (current_rx_state == RX_BULK_OUT_WORD && ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_BULK_OUT_FROM_HOST);
+    assign bulk_out_wr_en   = 1'b0; // Default off
+    assign ep0_out_data_available = 1'b0; // Default off
+    assign ep0_in_ack_received = 1'b0; // Default off, pulse only
 
     case (current_rx_state)
       RX_IDLE: begin
         if (ft601_if_dout_valid) begin
           automatic logic [CH_WIDTH-1:0] channel = ft601_if_dout[CH_POS +: CH_WIDTH];
-          if (channel == CH_EP0_SETUP) begin
-            next_rx_state = RX_SETUP_P1;
-          end else if (channel == CH_EP0_DATA_OUT_FROM_HOST) begin
-            // Check if CDC handler is expecting OUT data (e.g. after a relevant SETUP ACK)
-            // For now, assume ep0_data_rx_ready_from_cdc implies this.
-            if(ep0_data_rx_ready_from_cdc) next_rx_state = RX_EP0_OUT_DATA_WORD;
-            // else stay IDLE, let host retry or timeout.
+          if (channel == CH_EP0_SETUP) next_rx_state = RX_SETUP_P1;
+          else if (channel == CH_EP0_DATA_OUT_FROM_HOST && expected_ep0_out_len_reg > 0 && received_ep0_out_bytes_count_reg < expected_ep0_out_len_reg) begin
+             if (ep0_data_rx_ready_from_cdc) next_rx_state = RX_EP0_OUT_DATA_WORD;
           end else if (channel == CH_BULK_OUT_FROM_HOST) begin
-            next_rx_state = RX_BULK_OUT_WORD;
-          end else if (channel == CH_EP0_IN_STATUS_FROM_HOST) begin
-            // This is host's ACK (ZLP) after we sent EP0 IN data.
-            assign ep0_in_ack_received = 1'b1; // Pulse for one cycle
-            // No state change needed, just signal CDC.
+            assign bulk_out_wr_en = 1'b1; // Pass through if valid
+            next_rx_state = RX_IDLE; // Consume immediately
+          end else if (channel == CH_EP0_IN_STATUS_FROM_HOST) begin // Host ACK for EP0 IN data
+            assign ep0_in_ack_received = 1'b1; // Pulse
           end
         end
       end
       RX_SETUP_P1: begin
-        if (ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_SETUP) begin
-          next_rx_state = RX_SETUP_P2;
-        end else if (ft601_if_dout_valid) { // Unexpected packet
-           next_rx_state = RX_IDLE; // Or error state
-        } // else wait for valid data
+        if (ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_SETUP) next_rx_state = RX_SETUP_P2;
+        else if (ft601_if_dout_valid) next_rx_state = RX_IDLE; // Error or unexpected
       end
-      RX_SETUP_P2: begin // Full setup packet in buffer_reg, ep0_setup_packet_valid asserted this cycle
-        if (cdc_acked_setup) begin // CDC handler processed the setup packet
-          next_rx_state = RX_IDLE; // Or transition based on if data phase is expected
-                                   // This needs more info from CDC: is it DATA_IN, DATA_OUT, or NO_DATA?
-                                   // For now, assuming adapter's job for setup is done once CDC ACKs.
+      RX_SETUP_P2: begin // ep0_setup_packet_valid is high this cycle
+        if (cdc_acked_setup_or_data_reg) begin // CDC handler processed the setup
+          if (expected_ep0_out_len_reg > 0) begin // If OUT data is expected
+            if (ep0_data_rx_ready_from_cdc) next_rx_state = RX_EP0_OUT_DATA_WORD; // CDC ready for first byte
+            else next_rx_state = RX_IDLE; // Problem: CDC not ready for required OUT data. Or wait? For now, IDLE.
+          } else { // No data phase or IN data phase
+            next_rx_state = RX_IDLE;
+          }
         end
-        // else hold state, ep0_setup_packet_valid remains asserted.
       end
       RX_EP0_OUT_DATA_WORD: begin
-        // ep0_out_data_available is asserted if ft601_if_dout_valid and correct channel
+        assign ep0_out_data_available = ft601_if_dout_valid && (ft601_if_dout[CH_POS +: CH_WIDTH] == CH_EP0_DATA_OUT_FROM_HOST);
         if (ep0_out_data_available && ep0_data_rx_ready_from_cdc) begin
-          // CDC handler consumed the byte.
-          // TODO: Need logic for multi-byte EP0 OUT transfers and ep0_out_data_last.
-          // For now, assume single byte, then status.
-          // This would typically wait for cdc_ack for data stage.
-          next_rx_state = RX_IDLE; // Simplified: assume data phase done
-        end
-        // else if !ft601_if_dout_valid, wait for next word or timeout
-        // else if !ep0_data_rx_ready_from_cdc, wait for CDC
+          if (received_ep0_out_bytes_count_reg + 1 == expected_ep0_out_len_reg) begin
+            next_rx_state = RX_AWAIT_CDC_ACK_AFTER_OUT; // All bytes sent to CDC
+          end else {
+            next_rx_state = RX_IDLE; // Go to IDLE to fetch next word from FT601
+          }
+        end // else stay, wait for CDC ready or new data word
       end
-      RX_BULK_OUT_WORD: begin
-        // bulk_out_wr_en is asserted combinationally if conditions are met
-        next_rx_state = RX_IDLE; // Assume data consumed by FIFO or FIFO handles backpressure
+      RX_AWAIT_CDC_ACK_AFTER_OUT: begin
+        if (cdc_acked_setup_or_data_reg) begin // CDC signals it processed all OUT data by asserting ep0_ack
+            // Now adapter needs to trigger STATUS IN ZLP from device side
+            next_rx_state = RX_IDLE;
+        end
+      end
+      RX_BULK_OUT_WORD: begin // This state might not be strictly necessary if handled in IDLE
+        if (ft601_if_dout_valid && ft601_if_dout[CH_POS +: CH_WIDTH] == CH_BULK_OUT_FROM_HOST) begin
+          assign bulk_out_wr_en = 1'b1;
+        end
+        next_rx_state = RX_IDLE;
       end
       default: next_rx_state = RX_IDLE;
     endcase
   end
 
-  // TX Logic: Sending data to FT601
+  // TX Logic
   always_ff @(posedge clk_sys or posedge rst_sys) begin
     if (rst_sys) begin
       current_tx_state <= TX_IDLE;
       ep0_tx_byte_reg <= '0;
       ep0_tx_last_reg <= 1'b0;
-      send_ep0_status_zlp_req <= 1'b0;
-      send_stall_req <= 1'b0;
+      send_ep0_status_zlp_req_reg <= 1'b0;
+      send_stall_req_reg <= 1'b0;
+      is_control_read_data_phase_pending_ack <= 1'b0;
     end else begin
       current_tx_state <= next_tx_state;
 
       if (ep0_stall && (current_tx_state == TX_IDLE || current_tx_state == TX_EP0_IN_DATA_WORD)) begin
-          send_stall_req <= 1'b1; // Prioritize STALL if requested by CDC
+          send_stall_req_reg <= 1'b1;
       end
-      if (current_tx_state == TX_SEND_STALL && ft601_if_din_req_data) begin // Stall sent
-          send_stall_req <= 1'b0;
+      if (current_tx_state == TX_SEND_STALL && ft601_if_din_req_data) begin
+          send_stall_req_reg <= 1'b0;
       end
 
-      // Latch EP0 IN data from CDC
-      if (ep0_data_tx_valid && ep0_data_tx_ready) begin // If CDC has data AND adapter is ready
+      if (ep0_data_tx_valid && ep0_data_tx_ready) begin
         ep0_tx_byte_reg <= ep0_data_tx;
         ep0_tx_last_reg <= ep0_data_tx_last;
       end
 
-      // Check if CDC expects us to send a ZLP status for Control Write
-      // This happens when CDC acks a transaction that had an OUT data phase or no data phase.
-      // Condition: ep0_ack is high, and the previous transaction was a control write.
-      // This needs more state tracking of the current EP0 transaction direction.
-      // Simplified: if ep0_ack is from a non-GET_DESCRIPTOR type handled by CDC.
-      // For now, this is manually triggered by testbench or higher logic if needed.
-      // if (cdc_acked_control_write_data_phase) send_ep0_status_zlp_req <= 1'b1;
-      if (current_tx_state == TX_EP0_STATUS_ZLP && ft601_if_din_req_data) begin
-          send_ep0_status_zlp_req <= 1'b0; // ZLP sent
+      // Logic to request sending IN ZLP for Control-Write status
+      if (cdc_acked_setup_or_data_reg &&
+          (current_rx_state == RX_AWAIT_CDC_ACK_AFTER_OUT || // After H->D data phase
+           (current_rx_state == RX_SETUP_P2 && expected_ep0_out_len_reg == 0 && !setup_packet_buffer_reg[7]) ) // No data phase, Host-to-Device
+         ) begin
+          send_ep0_status_zlp_req_reg <= 1'b1;
       end
+      if (current_tx_state == TX_EP0_STATUS_ZLP && ft601_if_din_req_data) begin
+          send_ep0_status_zlp_req_reg <= 1'b0;
+      end
+
+      // For Control-Read, after last data byte sent by this adapter.
+      if (current_tx_state == TX_EP0_IN_DATA_WORD && ep0_tx_last_reg && ft601_if_din_wr_en) begin
+          is_control_read_data_phase_pending_ack <= 1'b1;
+      end
+      if (is_control_read_data_phase_pending_ack && ep0_in_ack_received) begin // ep0_in_ack_received is pulsed by RX logic
+          is_control_read_data_phase_pending_ack <= 1'b0;
+      end
+      if (current_tx_state != TX_AWAIT_HOST_IN_ACK) begin // Clear if not in this state
+          is_control_read_data_phase_pending_ack <= 1'b0;
+      end
+
+
     end
   end
 
   always_comb begin
     next_tx_state = current_tx_state;
-    assign ep0_data_tx_ready = (current_tx_state == TX_IDLE) && !send_stall_req && !send_ep0_status_zlp_req;
+    // ep0_data_tx_ready is asserted when adapter is in TX_IDLE and not trying to send STALL or ZLP status
+    assign ep0_data_tx_ready = (current_tx_state == TX_IDLE) &&
+                               !send_stall_req_reg &&
+                               !send_ep0_status_zlp_req_reg &&
+                               !is_control_read_data_phase_pending_ack;
 
-    // Default assignments for FT601 TX path
-    logic [FT601_DATA_WIDTH-1:0] current_ft601_din;
-    logic current_ft601_din_wr_en;
-
-    current_ft601_din = '0;
-    current_ft601_din_wr_en = 1'b0;
-    assign bulk_in_rd_en = 1'b0; // Default
+    automatic logic [FT601_DATA_WIDTH-1:0] temp_ft601_din = '0;
+    automatic logic temp_ft601_din_wr_en = 1'b0;
+    automatic logic temp_bulk_in_rd_en = 1'b0;
 
     case (current_tx_state)
       TX_IDLE: begin
-        if (send_stall_req && ft601_if_din_req_data) begin
-          next_tx_state = TX_SEND_STALL;
-        end else if (send_ep0_status_zlp_req && ft601_if_din_req_data) begin
-          next_tx_state = TX_EP0_STATUS_ZLP;
-        end else if (ep0_data_tx_valid && ft601_if_din_req_data) begin // EP0 IN data from CDC
-          next_tx_state = TX_EP0_IN_DATA_WORD;
-        end else if (!bulk_in_empty && ft601_if_din_req_data) begin // Bulk IN data from FIFO
-          next_tx_state = TX_BULK_IN_WORD;
-        end
+        if (send_stall_req_reg && ft601_if_din_req_data) next_tx_state = TX_SEND_STALL;
+        else if (send_ep0_status_zlp_req_reg && ft601_if_din_req_data) next_tx_state = TX_EP0_STATUS_ZLP;
+        else if (is_control_read_data_phase_pending_ack) next_tx_state = TX_AWAIT_HOST_IN_ACK; // Wait for host ZLP
+        else if (ep0_data_tx_valid && ft601_if_din_req_data) next_tx_state = TX_EP0_IN_DATA_WORD;
+        else if (!bulk_in_empty && ft601_if_din_req_data) next_tx_state = TX_BULK_IN_WORD;
       end
       TX_EP0_IN_DATA_WORD: begin
-        current_ft601_din = {CH_EP0_DATA_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH-APP_DATA_WIDTH){1'b0}}, ep0_tx_byte_reg};
-        current_ft601_din_wr_en = ft601_if_din_req_data;
-        if (ft601_if_din_req_data) begin // Successfully sent current byte
-          if (ep0_tx_last_reg) begin
-            // After last data byte of an IN transfer, host sends ZLP status.
-            // Adapter waits for CH_EP0_IN_STATUS_FROM_HOST.
-            next_tx_state = TX_IDLE;
-          end else {
-            // Ready for next byte from CDC (ep0_data_tx_ready will be high via IDLE state if din_req_data still high)
-            next_tx_state = TX_IDLE;
-          end
-        end
-        // else stay in TX_EP0_IN_DATA_WORD, retry sending same byte
+        if (ft601_if_din_req_data) begin
+          temp_ft601_din = {CH_EP0_DATA_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH-APP_DATA_WIDTH){1'b0}}, ep0_tx_byte_reg};
+          temp_ft601_din_wr_en = 1'b1;
+          if (ep0_tx_last_reg) next_tx_state = TX_AWAIT_HOST_IN_ACK; // Sent last byte, now wait for Host ZLP status
+          else next_tx_state = TX_IDLE; // Ready for next byte from CDC
+        end // else stay, retry sending current byte
       end
       TX_BULK_IN_WORD: begin
         if (!bulk_in_empty && ft601_if_din_req_data) begin
-          assign bulk_in_rd_en = 1'b1; // Enable read from FIFO
-          current_ft601_din = {CH_BULK_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH-APP_DATA_WIDTH){1'b0}}, bulk_in_dout};
-          current_ft601_din_wr_en = 1'b1;
+          temp_bulk_in_rd_en = 1'b1;
+          temp_ft601_din = {CH_BULK_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH-APP_DATA_WIDTH){1'b0}}, bulk_in_dout};
+          temp_ft601_din_wr_en = 1'b1;
         end
-        next_tx_state = TX_IDLE; // Go back to IDLE to re-evaluate
+        next_tx_state = TX_IDLE;
       end
       TX_SEND_STALL: begin
-        current_ft601_din = {CH_EP0_STALL_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH){1'b0}} };
-        current_ft601_din_wr_en = ft601_if_din_req_data;
-        if (ft601_if_din_req_data) begin // Stall signal sent
-            next_tx_state = TX_IDLE;
+        if (ft601_if_din_req_data) begin
+          temp_ft601_din = {CH_EP0_STALL_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH){1'b0}} };
+          temp_ft601_din_wr_en = 1'b1;
+          next_tx_state = TX_IDLE;
         end
       end
       TX_EP0_STATUS_ZLP: begin // For Control-Write status phase (Device to Host ZLP)
-        current_ft601_din = {CH_EP0_STATUS_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH){1'b0}} }; // Zero length data payload
-        current_ft601_din_wr_en = ft601_if_din_req_data;
-        if (ft601_if_din_req_data) begin // ZLP sent
+        if (ft601_if_din_req_data) begin
+          temp_ft601_din = {CH_EP0_STATUS_IN_TO_HOST, {(FT601_DATA_WIDTH-CH_WIDTH){1'b0}} };
+          temp_ft601_din_wr_en = 1'b1;
+          next_tx_state = TX_IDLE;
+        end
+      end
+      TX_AWAIT_HOST_IN_ACK: begin
+        // In this state, ep0_data_tx_ready is LOW.
+        // Waiting for RX path to see CH_EP0_IN_STATUS_FROM_HOST and pulse ep0_in_ack_received.
+        if (ep0_in_ack_received) begin // This signal is pulsed by RX logic
             next_tx_state = TX_IDLE;
         end
       end
       default: next_tx_state = TX_IDLE;
     endcase
 
-    assign ft601_if_din = current_ft601_din;
-    assign ft601_if_din_wr_en = current_ft601_din_wr_en;
+    assign ft601_if_din = temp_ft601_din;
+    assign ft601_if_din_wr_en = temp_ft601_din_wr_en;
+    assign bulk_in_rd_en = temp_bulk_in_rd_en;
   end
 
 endmodule

@@ -24,6 +24,7 @@ module cdc_acm_handler (
     input  logic ep0_data_rx_valid_from_adapter, // Adapter has valid EP0 OUT data byte
     input  logic [7:0] ep0_data_rx_from_adapter,   // EP0 OUT data byte from Adapter
     output logic ep0_data_rx_ready_from_cdc,   // CDC Handler is ready for next EP0 OUT data byte
+    input  logic ep0_in_ack_received_from_adapter, // Adapter confirms host ACKed IN data status phase
 
     output logic ep0_stall,                 // Assert to stall EP0
     output logic ep0_ack,                   // Assert to acknowledge setup packet or successful data/status stage
@@ -59,6 +60,7 @@ module cdc_acm_handler (
   logic [15:0] bytes_received_count;   // For EP0 OUT data
   logic [15:0] current_data_ptr;       // For TX
   logic [15:0] current_rx_data_ptr;    // For RX (into line_coding_buffer)
+  logic is_control_read_transfer_reg; // To remember transfer type for status phase
 
   // USB Device State
   logic [6:0] device_address;
@@ -94,9 +96,8 @@ module cdc_acm_handler (
   localparam DESC_TYPE_CONFIGURATION = 2;
   localparam DESC_TYPE_STRING        = 3;
 
-  // Parse Setup Packet
+  // Parse Setup Packet & Assign control line outputs
   always_comb begin
-    // Assign control line outputs
     dtr_active_o = control_line_dtr;
     rts_active_o = control_line_rts;
 
@@ -132,6 +133,7 @@ module cdc_acm_handler (
       bytes_received_count <= 16'd0;
       current_rx_data_ptr <= 16'd0;
       ep0_data_rx_ready_from_cdc <= 1'b0;
+      is_control_read_transfer_reg <= 1'b0;
       for (int i = 0; i < 7; i++) begin
         line_coding_buffer[i] = 8'd0;
       end
@@ -153,6 +155,7 @@ module cdc_acm_handler (
           selected_descriptor_data = null;
           current_descriptor_len = 0;
           bytes_received_count <= 16'd0;
+          is_control_read_transfer_reg <= 1'b0; // Default to not a control read
 
           if (setup_packet_valid) begin
             logic req_is_device_to_host = bmRequestType[7];
@@ -160,6 +163,7 @@ module cdc_acm_handler (
             logic [4:0] req_recipient   = bmRequestType[4:0];
 
             if (req_type == REQUESTTYPE_TYPE_STANDARD && req_recipient == REQUESTTYPE_RECIP_DEVICE) begin
+              is_control_read_transfer_reg <= req_is_device_to_host; // GET_DESCRIPTOR is read, others are write
               if (req_is_device_to_host && bRequest == REQ_GET_DESCRIPTOR) begin
                 logic [7:0] desc_type = wValue[15:8];
                 logic [7:0] desc_idx  = wValue[7:0];
@@ -180,30 +184,32 @@ module cdc_acm_handler (
                   default: found_descriptor = 1'b0;
                 endcase
                 if (found_descriptor) begin
-                  ep0_ack <= 1'b1;
+                  ep0_ack <= 1'b1; // ACK Setup to Adapter
                   bytes_to_send = (requested_len < current_descriptor_len) ? requested_len : current_descriptor_len;
                   if (bytes_to_send > 0) next_ep0_state <= DATA_TX_PHASE;
-                  else next_ep0_state <= STATUS_PHASE;
+                  else next_ep0_state <= STATUS_PHASE; // For ZLP GET_DESCRIPTOR
                 end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
               end else if (!req_is_device_to_host && bRequest == REQ_SET_ADDRESS) begin
                 device_address <= wValue[6:0];
-                ep0_ack <= 1'b1;
+                ep0_ack <= 1'b1; // ACK Setup to Adapter
                 next_ep0_state <= STATUS_PHASE;
               end else if (!req_is_device_to_host && bRequest == REQ_SET_CONFIGURATION) begin
                 logic [7:0] config_val = wValue[7:0];
                 if (config_val == 1 || config_val == 0) begin
                   configured_state <= (config_val == 1);
-                  ep0_ack <= 1'b1;
+                  ep0_ack <= 1'b1; // ACK Setup to Adapter
                   next_ep0_state <= STATUS_PHASE;
                 end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
               end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; } // Unhandled Standard Device Request
             end else if (req_type == REQUESTTYPE_TYPE_CLASS && req_recipient == REQUESTTYPE_RECIP_INTERFACE) begin
+              is_control_read_transfer_reg <= req_is_device_to_host; // GET_LINE_CODING is read
               if (wIndex[7:0] == CDC_COMM_INTERFACE_IDX) begin
                 if (bmRequestType == REQUESTTYPE_CLASS_INTERFACE_H2D && bRequest == REQ_SET_LINE_CODING) begin
                   if (wLength == 7) begin
                     requested_len = 7;
                     bytes_received_count <= 16'd0;
                     current_rx_data_ptr <= 16'd0;
+                    // Adapter ACKs setup. CDC waits for data then ACKs data stage in STATUS_PHASE.
                     next_ep0_state <= DATA_RX_PHASE;
                   end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
                 end else if (bmRequestType == REQUESTTYPE_CLASS_INTERFACE_D2H && bRequest == REQ_GET_LINE_CODING) begin
@@ -217,19 +223,19 @@ module cdc_acm_handler (
                   selected_descriptor_data = line_coding_buffer;
                   current_descriptor_len = 7;
                   bytes_to_send = (wLength < current_descriptor_len) ? wLength : current_descriptor_len;
-                  ep0_ack <= 1'b1;
+                  ep0_ack <= 1'b1; // ACK Setup to Adapter
                   if (bytes_to_send > 0) next_ep0_state <= DATA_TX_PHASE;
                   else next_ep0_state <= STATUS_PHASE;
                 end else if (bmRequestType == REQUESTTYPE_CLASS_INTERFACE_H2D && bRequest == REQ_SET_CONTROL_LINE_STATE) begin
                   if (wLength == 0) begin
                     control_line_dtr <= wValue[0];
                     control_line_rts <= wValue[1];
-                    ep0_ack <= 1'b1;
+                    ep0_ack <= 1'b1; // ACK Setup to Adapter
                     next_ep0_state <= STATUS_PHASE;
                   end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
-                end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; } // Unhandled Class Interface Request
-              end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; } // Incorrect Interface
-            end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; } // Unhandled request type/recipient
+                end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
+              end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
+            end else { ep0_stall <= 1'b1; next_ep0_state <= IDLE; }
           end else { next_ep0_state <= IDLE; }
         end
 
@@ -241,17 +247,30 @@ module cdc_acm_handler (
               ep0_data_tx <= selected_descriptor_data[current_data_ptr];
               current_data_ptr <= current_data_ptr + 1;
               bytes_sent_count <= bytes_sent_count + 1;
-              if (bytes_sent_count + 1 == bytes_to_send) begin
+              if (bytes_sent_count + 1 == bytes_to_send) {
                 ep0_data_tx_last <= 1'b1;
                 next_ep0_state <= STATUS_PHASE;
-              end else { next_ep0_state <= DATA_TX_PHASE; }
+              } else { next_ep0_state <= DATA_TX_PHASE; }
             end else { next_ep0_state <= DATA_TX_PHASE; }
           end else { ep0_data_tx_last <= 1'b1; next_ep0_state <= STATUS_PHASE; }
         end
 
         STATUS_PHASE: begin
-          ep0_ack <= 1'b1; // Signal completion of data/status phase to adapter
-          next_ep0_state <= IDLE;
+          if (is_control_read_transfer_reg) begin // Control-Read (e.g. GET_DESCRIPTOR)
+            // We have sent all IN data (or ZLP if wLength was 0).
+            // Now we wait for the adapter to signal that host has ACKed status (e.g. by sending its OUT ZLP).
+            if (ep0_in_ack_received_from_adapter) begin
+              ep0_ack <= 1'b1; // ACK to adapter that we've seen the host's status ACK.
+              next_ep0_state <= IDLE;
+            end else {
+              next_ep0_state <= STATUS_PHASE; // Keep waiting for host status ACK via adapter
+            }
+          end else { // Control-Write (e.g. SET_ADDRESS, SET_LINE_CODING)
+            // We have received all OUT data (if any), or processed no-data SETUP.
+            // Assert ep0_ack to signal adapter that CDC is done. Adapter will send IN ZLP status to host.
+            ep0_ack <= 1'b1;
+            next_ep0_state <= IDLE;
+          }
         end
 
         DATA_RX_PHASE: begin // For EP0 OUT data (e.g. SET_LINE_CODING)

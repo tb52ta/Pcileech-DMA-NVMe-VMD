@@ -402,7 +402,7 @@ module usb_serial_top #(
       .ep0_setup_packet_valid(setup_packet_valid_to_cdc),
       .ep0_setup_packet_data(setup_packet_data_to_cdc),
       .ep0_data_tx_ready(ep0_data_tx_ready_to_cdc),
-      .ep0_in_ack_received(ep0_ack_to_cdc),
+      .ep0_in_ack_received(ep0_in_ack_received_from_adapter_to_cdc_wire), // Changed wire name
       .ep0_out_data_available(ep0_rx_data_valid_to_cdc_from_adapter_wire),
       .ep0_out_data(ep0_rx_data_to_cdc_from_adapter_wire),
       .ep0_out_data_last(ep0_rx_data_last_to_cdc_from_adapter_wire),
@@ -436,14 +436,15 @@ module usb_serial_top #(
       .ep0_data_tx_last(ep0_data_tx_last_from_cdc),
       .ep0_data_tx_ready(ep0_data_tx_ready_to_cdc),
       .ep0_stall(ep0_stall_from_cdc),
-      .ep0_ack(ep0_ack_from_cdc_to_adapter_wire), // cdc_acm_handler's output ack, input to adapter
+      .ep0_ack(ep0_ack_from_cdc_to_adapter_wire),
       // EP0 OUT Data Path from Adapter
       .ep0_data_rx_valid_from_adapter(ep0_rx_data_valid_to_cdc_from_adapter_wire),
       .ep0_data_rx_from_adapter(ep0_rx_data_to_cdc_from_adapter_wire),
-      .ep0_data_rx_ready_from_cdc(ep0_data_rx_ready_from_cdc_to_adapter_wire), // Output from CDC, input to adapter
+      .ep0_data_rx_ready_from_cdc(ep0_data_rx_ready_from_cdc_to_adapter_wire),
+      .ep0_in_ack_received_from_adapter(ep0_in_ack_received_from_adapter_to_cdc_wire), // New input
       // Control Line State Outputs
-      .dtr_active_o(dtr_active_from_cdc), // Changed from .dtr_active
-      .rts_active_o(rts_from_cdc_w)       // New port
+      .dtr_active_o(dtr_active_from_cdc),
+      .rts_active_o(rts_from_cdc_w)
   );
 
   dma_controller #(

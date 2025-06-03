@@ -14,7 +14,7 @@
 #    source ./vivado_build_usb_serial.tcl
 
 # --- Project Setup ---
-set P_FPGA_PART "xc7a35tcpg236-1"  ;# Example Artix-7 part, change as needed
+set P_FPGA_PART "xc7a75tfgg484-2"  ;# Target Artix-7 75T part
 set P_PROJECT_NAME "usb_serial_emulator_proj"
 set P_TOP_MODULE "usb_serial_top"
 set P_BUILD_OUTPUT_DIR "./build_output" ;# Output directory relative to this script
@@ -30,9 +30,15 @@ create_project -force ${P_PROJECT_NAME} ${P_BUILD_OUTPUT_DIR} -part ${P_FPGA_PAR
 
 # --- Add Source Files ---
 # Add all SystemVerilog files from the ../src directory.
-# The usb_serial_top.sv contains behavioral models for BRAM and FIFO for simulation,
-# for synthesis these should be replaced by IP cores or inferred from synthesizable SystemVerilog.
-# If using IP cores, those .xci files would be added here as well.
+# This includes:
+#   cdc_acm_handler.sv
+#   dma_controller.sv
+#   ft601_protocol_adapter.sv
+#   pcileech_ft601.sv
+#   serial_port_application.sv
+#   usb_descriptors.sv
+#   usb_serial_top.sv (which contains behavioral BRAM and FIFO models for simulation)
+# For synthesis, behavioral BRAM/FIFO models should be replaced by IP cores or inferred.
 puts "INFO: Adding source files..."
 add_files -norecurse [glob -nocomplain ../src/*.sv]
 
