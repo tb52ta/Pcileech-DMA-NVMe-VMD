@@ -22,7 +22,7 @@ The primary goal is to create a synthesizable FPGA core that demonstrates how to
     *   BRAM-based buffers for TX (Application to USB/FT601) and RX (USB/FT601 to Application) data paths.
     *   Dedicated DMA controller to move data between BRAMs and FIFOs that interface with the FT601 adapter.
 *   **Modular Design:** Composed of distinct modules for FT601 low-level interface, protocol adaptation, CDC handling, DMA, and application-side buffer management.
-*   **Basic Simulation Testbench:** Verifies enumeration, simple data TX/RX paths, and `SERIAL_STATE` notifications.
+*   **Comprehensive Simulation Testbench:** Verifies enumeration, data TX/RX paths (including stress tests), and `SERIAL_STATE` notifications under various conditions, including concurrent operations.
 
 ## 3. Modules
 
@@ -44,7 +44,7 @@ The project is structured into several key SystemVerilog modules:
 *   **`async_fifo.sv` (Behavioral, in `usb_serial_top.sv`):** Generic FIFO model. Since the FT601 clock is now the main system clock, these FIFOs operate synchronously in the current design.
 
 ## 4. FT601 FIFO Interface and Protocol
-
+(Section content remains largely the same as previous version, details channel IDs etc.)
 *   **Physical FT601 Interface (exposed by `usb_serial_top.sv`):**
     *   `ft601_clk_i`: Clock input from FT601 (typically 100MHz), used as the main system clock.
     *   `ft601_rxf_n_i`: Active low, indicates data is available in FT601's internal RX FIFO (Host to FPGA).
@@ -82,25 +82,36 @@ The project is structured into several key SystemVerilog modules:
     *   Driving `tb_ft601_rxf_n` and `tb_ft601_txe_n` to mimic FT601 FIFO status.
     *   Sending and receiving 32-bit data words on `ft601_data_io` using tasks that model the FT601 read/write strobes.
     *   Using the defined channelized protocol to send SETUP packets and interpret EP0/Bulk/Interrupt data.
-*   The testbench verifies basic enumeration, simple data TX/RX paths, and `SERIAL_STATE` notifications by simulating DTR changes and checking the received notification content (header, DCD, DSR bits).
+*   **Test Capabilities:**
+    *   **USB Enumeration:** Verifies basic enumeration sequence (GET_DESCRIPTORs, SET_ADDRESS, SET_CONFIGURATION).
+    *   **CDC-ACM Requests:** Tests `SET_LINE_CODING` (including data phase) and `SET_CONTROL_LINE_STATE`.
+    *   **Interrupt IN Endpoint:** Verifies `SERIAL_STATE` notifications by simulating DTR changes and checking the received notification content (header, DCD, DSR bits).
+    *   **TX Data Path Stress Test:** Sends large volumes of data (e.g., 2KB) from the simulated application to test the TX DMA channel, `serial_port_application` TX buffer management, and `ft601_protocol_adapter` bulk TX handling under sustained load. Data integrity is verified.
+    *   **RX Data Path Stress Test:** Simulates the host sending large volumes of data to test the RX DMA channel, `serial_port_application` RX buffer management, and `ft601_protocol_adapter` bulk RX handling. Data integrity is verified in the application layer. This includes tests for single byte, full DMA packet, larger than DMA packet, and back-to-back small transfers.
+    *   **Concurrent Data Flow Simulation:** Includes test scenarios where TX bulk, RX bulk, and Interrupt IN data flows are initiated concurrently or are rapidly interleaved. This is achieved by forking multiple producer and consumer tasks in the testbench. This setup aims to stress the arbitration logic within `ft601_protocol_adapter.sv` and test overall system stability under concurrent operations.
+*   The testbench uses hierarchical signal access for stimulus and verification where necessary.
 
-## 7. Future Work / TODO
+## 7. Project Status
 
-*   **Robust EP0 Handling in Adapter:** Fully implement and test EP0 OUT data phase handling (multi-byte transfers) and status phase management (sending/receiving ZLPs, STALL handshake) in `ft601_protocol_adapter.sv`.
+The RTL design has been subjected to comprehensive testbench scenarios including enumeration, basic CDC class request handling, interrupt notifications, data path stress tests (TX and RX), and concurrent operations. Further refinements would typically be based on results from more exhaustive simulation runs, formal verification, and ultimately, hardware testing.
+
+## 8. Future Work / TODO
+
+*   **Robust EP0 Handling in Adapter:** Fully implement and test EP0 OUT data phase handling (multi-byte transfers with correct `ep0_out_data_last` signaling) and more robust status phase management (sending/receiving ZLPs, STALL handshake) in `ft601_protocol_adapter.sv`.
 *   **Host-Side Application/Driver:** A compatible host-side application is required to communicate with the FPGA via the FT601 using the defined channelized protocol for EP0 and bulk transfers.
 *   **Interrupt IN Endpoint Notifications:**
-    *   Implement generation and reporting of other `SERIAL_STATE` bits (e.g., break, errors) if corresponding conditions are ever modeled in the DUT.
-    *   More comprehensive testing of Interrupt IN endpoint under various conditions (e.g., back-to-back status changes).
+    *   Implement generation and reporting of other `SERIAL_STATE` bits (e.g., break, errors like bOverRun, bParity, bFraming) if corresponding conditions are ever modeled in the DUT.
+    *   More comprehensive testing of Interrupt IN endpoint under various conditions (e.g., back-to-back status changes, concurrent with high bulk traffic).
 *   **Line Coding Application:** The `cdc_acm_handler` stores line coding parameters; these could be outputted for an actual UART if one were part of the design.
-*   **FT601 Configuration/EEPROM:** Consider if any specific FT601 EEPROM configurations are needed (e.g., for device descriptors, though currently handled by FPGA). The `pcileech_ft601` module may assume certain FT601 modes.
+*   **FT601 Configuration/EEPROM:** Consider if any specific FT601 EEPROM configurations are needed (e.g., for device descriptors, though currently handled by FPGA). The `pcileech_ft601` module may assume certain FT601 modes (e.g., 245 FIFO).
 *   **Error Handling & Timeouts:** Improve error detection and timeout mechanisms in the `ft601_protocol_adapter` and testbench.
 *   **Advanced CDC-ACM Features:** Support for break signalling, carrier control, etc.
 *   **Power Management:** Handle USB suspend/resume events (may require FT601 SIWU usage).
 *   **FPGA Implementation:**
     *   Replace generic BRAM/FIFO models with FPGA vendor primitives for optimal resource usage and timing.
-    *   Develop comprehensive XDC constraints.
-    *   Test on actual FPGA hardware.
+    *   Develop comprehensive XDC constraints for timing closure.
+    *   Test on actual FPGA hardware with an FT601.
 
-## 8. Tools
+## 9. Tools
 * Vivado for synthesis and implementation (example build script provided).
 * A SystemVerilog simulator for testing.
